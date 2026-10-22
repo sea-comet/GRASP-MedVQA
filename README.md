@@ -1,6 +1,6 @@
 # GRASP: Group-Adaptive Hybrid RL–SFT Post-Training for Medical VQA without Reasoning Annotations
 
-Wanqi Dong, Jingze Ge, Wanyue Dong, Mehul Motani
+Wanqi Dong, Wanyue Dong, Jingze Ge, Mehul Motani
 
 Paper: arXiv link coming soon. Data (MedTerse): Hugging Face link coming soon.
 
