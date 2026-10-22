@@ -2,7 +2,7 @@
 
 Wanqi Dong, Wanyue Dong, Jingze Ge, Mehul Motani
 
-Paper: arXiv link coming soon. Data (MedTerse): Hugging Face link coming soon.
+Paper: arXiv link coming soon. Data (MedTerse): https://huggingface.co/datasets/seacomet/medterse-vqa
 
 Training code for the paper's models: Qwen3-VL-8B-Instruct (main model)
 and InternVL3-8B, fine-tuned with LoRA on short-answer medical VQA with the same
@@ -71,12 +71,13 @@ Models downloaded at first use: `Qwen/Qwen3-VL-8B-Instruct` or
 
 ## Data
 
-The data release (MedTerse, on the Hugging Face Hub; link coming soon) unpacks to `data/` and holds
-`train/qa.jsonl` and the evaluation splits as text only, plus
-`build_images.py`, which downloads the images from the original sources and
-verifies their hashes. With the data unpacked to `data/` next to this
-repository (`GRASP-MedVQA/` and `data/` side by side):
+The data release ([`seacomet/medterse-vqa`](https://huggingface.co/datasets/seacomet/medterse-vqa)
+on the Hugging Face Hub) holds `train/qa.jsonl` and the evaluation splits as
+text only, plus `build_images.py`, which downloads the images from the original
+sources and verifies their hashes. Download it to `data/` next to this
+repository (`GRASP-MedVQA/` and `data/` side by side) and build the images:
 
+    huggingface-cli download seacomet/medterse-vqa --repo-type dataset --local-dir data
     cd data && python build_images.py --root .
 
 `--data_root` must then contain `train/qa.jsonl`, one question per line with at
