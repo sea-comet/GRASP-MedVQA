@@ -19,7 +19,7 @@ from data import CACHE_DIRNAME
 def _convert(job: tuple[str, str]) -> None:
     from PIL import Image, ImageFile
 
-    # Some whole-slide pathology figures exceed Pillow's default pixel guard.
+    # Some pathology images exceed Pillow's size limit, and some files are truncated.
     Image.MAX_IMAGE_PIXELS = None
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     source, target = job

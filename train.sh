@@ -1,41 +1,42 @@
 #!/usr/bin/env bash
-# The paper's configurations. Both use bf16 LoRA (r = 32, vision and language
-# layers) and 12 questions x 8 rollouts per optimizer step
-# (NUM_GPUS * BATCH_SIZE * GRAD_ACCUM = 96 rollouts).
+# Train with the paper's settings.
 #
-#   MODEL=qwen     Qwen3-VL-8B-Instruct, 2 epochs (4 x A100-80GB, about 20 hours)
-#   MODEL=internvl InternVL3-8B, 2 epochs (paper run: 3 x RTX 6000 Ada 48GB, BATCH_SIZE = 16)
-#
-#   DATA_ROOT=../data OUTPUT_DIR=outputs/qwen MODEL=qwen bash train.sh
-#   DATA_ROOT=../data OUTPUT_DIR=outputs/internvl MODEL=internvl NUM_GPUS=3 bash train.sh
-#
-# Relative paths are resolved from this directory (code/); ../data is the
-# unpacked data release.
-set -euo pipefail
-cd "$(dirname "$0")"
+# Usage: edit the settings below, then run
+#     bash train.sh
+# Extra arguments are passed on to train.py and override the values below,
+# e.g.  bash train.sh --seed 1   (python train.py --help lists all options).
 
-MODEL="${MODEL:-qwen}"
-NUM_GPUS="${NUM_GPUS:-4}"
-BATCH_SIZE="${BATCH_SIZE:-$((48 / NUM_GPUS))}"
-DATA_ROOT="${DATA_ROOT:-../data}"
-OUTPUT_DIR="${OUTPUT_DIR:-outputs/$MODEL}"
+# ------------------------------------------------------------------ settings
+MODEL=qwen                 # qwen: Qwen3-VL-8B-Instruct, internvl: InternVL3-8B
+NUM_GPUS=4                 # 4 x A100-80GB
+BATCH_SIZE=12              # rollouts per GPU (4 GPUs x 12 = 48)
+DATA_ROOT=../data          # the unpacked data release
+OUTPUT_DIR=outputs/$MODEL  # checkpoints and the final model
+# ---------------------------------------------------------------------------
 
-case "$MODEL" in
-    qwen)     BASE_MODEL=Qwen/Qwen3-VL-8B-Instruct; NUM_EPOCHS=2 ;;
-    internvl) BASE_MODEL=OpenGVLab/InternVL3-8B-hf; NUM_EPOCHS=2 ;;
-    *) echo "MODEL must be qwen or internvl" >&2; exit 1 ;;
-esac
+set -euo pipefail        # stop at the first error
+cd "$(dirname "$0")"     # so that relative paths are relative to this folder
 
-export UNSLOTH_COMPILE_OVERWRITE=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+if [ "$MODEL" = qwen ]; then
+    BASE_MODEL=Qwen/Qwen3-VL-8B-Instruct
+elif [ "$MODEL" = internvl ]; then
+    BASE_MODEL=OpenGVLab/InternVL3-8B-hf
+else
+    echo "MODEL must be qwen or internvl" >&2
+    exit 1
+fi
 
+export UNSLOTH_COMPILE_OVERWRITE=0                       # use unsloth_compiled_cache/ as is
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # reduce GPU memory fragmentation
+
+# Each optimizer step: 48 rollouts x 2 accumulation steps = 12 questions x 8 rollouts.
 accelerate launch --num_processes "$NUM_GPUS" train.py \
+    --base_model "$BASE_MODEL" \
     --data_root "$DATA_ROOT" \
     --output_dir "$OUTPUT_DIR" \
-    --base_model "$BASE_MODEL" \
-    --num_epochs "$NUM_EPOCHS" \
-    --learning_rate 2e-5 \
     --batch_size "$BATCH_SIZE" \
+    --num_epochs 2 \
+    --learning_rate 2e-5 \
     --gradient_accumulation_steps 2 \
     --num_generations 8 \
     --temperature 1.15 \

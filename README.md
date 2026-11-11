@@ -4,9 +4,9 @@ Wanqi Dong, Wanyue Dong, Jingze Ge, Mehul Motani
 
 Paper: arXiv link coming soon. Data (MedTerse): https://huggingface.co/datasets/seacomet/medterse-vqa
 
-Training code for the paper's models: Qwen3-VL-8B-Instruct (main model)
-and InternVL3-8B, fine-tuned with LoRA on short-answer medical VQA with the same
-objective. Evaluation code, baselines and ablation launchers are not included.
+Training and evaluation code for the paper's models: Qwen3-VL-8B-Instruct
+(main model) and InternVL3-8B, fine-tuned with LoRA on short-answer medical VQA
+with the same objective. Baselines and ablation launchers are not included.
 The paper calls the RL branch GSPO-EGC and the state-adaptive correction below
 the extreme-group correction (EGC).
 
@@ -22,6 +22,7 @@ the extreme-group correction (EGC).
 | `rewards.py` | format, correctness, ClinicalBERTScore and BiomedCLIP rewards |
 | `format_utils.py` | output format parsing and reasoning repair |
 | `data.py`, `prepare_images.py` | data loading and the 512x512 image cache |
+| `eval.sh`, `evaluate.py` | evaluation on the in-domain and out-of-domain test splits |
 
 ## Objective
 
@@ -94,19 +95,15 @@ this repository:
 
 ## Training
 
-From this repository (`train.sh` resolves relative paths from its own directory):
+Set the model (`MODEL=qwen` or `MODEL=internvl`) and paths at the top of
+`train.sh`, then run from this repository (`train.sh` resolves relative paths
+from its own directory)
 
-    DATA_ROOT=../data OUTPUT_DIR=outputs/qwen MODEL=qwen NUM_GPUS=4 bash train.sh
-    DATA_ROOT=../data OUTPUT_DIR=outputs/internvl MODEL=internvl NUM_GPUS=3 bash train.sh
+    bash train.sh
 
-Both use 48 rollouts per micro-step (`BATCH_SIZE = 48 / NUM_GPUS`) and 2
-accumulation steps: 12 questions per optimizer step, 1,074 steps per epoch on
-12,893 questions.
-
-| model | epochs | paper hardware |
-|---|---|---|
-| Qwen3-VL-8B-Instruct | 2 | 4 x A100-80GB, 12 rollouts per GPU, about 20 hours |
-| InternVL3-8B (`OpenGVLab/InternVL3-8B-hf`) | 2 | 3 x RTX 6000 Ada (48 GB), 16 rollouts per GPU |
+Both models train for 2 epochs on 4 x A100-80GB with 12 rollouts per GPU and 2
+accumulation steps: 12 questions x 8 rollouts per optimizer step, 1,074 steps
+per epoch on 12,893 questions.
 
 For InternVL3, `internvl.py` passes a one-row-per-image grid through the
 upstream chunked forward so that each chunk receives its own images, removes it
@@ -129,6 +126,26 @@ written to `OUTPUT_DIR/final_lora` and `OUTPUT_DIR/final_merged`.
 | correction | kappa 1, EMA decay 0.99 |
 | reward weights | format 0.5, correctness 1.0, ClinicalBERTScore 0.2, BiomedCLIP 0.4 |
 | seed | 42 (LoRA initialization, data order, sampling) |
+
+## Evaluation
+
+Set the model and paths at the top of `eval.sh`, then run
+
+    bash eval.sh
+
+It builds the 512x512 images of the test splits (once) and evaluates the model
+on the in-domain splits (`validation`, `slake_test`, `vqa_rad_test`,
+`pathvqa_test`) and the eight out-of-domain OmniMedVQA-V2 modality splits
+(`omnimed_*_test`) on 4 x A100-80GB. Decoding is greedy with the training prompt
+and at most 256 new tokens. The prediction is the single `<answer>` span,
+correct if it equals the gold answer after normalization (lower case, number
+words to digits, whitespace collapsed, punctuation removed).
+
+`OUTPUT_DIR` receives one CSV per split (question, gold, prediction, full
+response, correctness) and `summary.json`: accuracy per split and, for each
+group, pooled accuracy over all its questions, macro average over its splits,
+accuracy on yes/no and on open questions, and balanced yes/no accuracy (mean of
+the accuracies on gold "yes" and gold "no").
 
 ## License
 

@@ -1,13 +1,12 @@
 """The four rollout rewards, combined with weights 0.5 / 1.0 / 0.2 / 0.4.
 
   format        <= 2.5  five 0.5-point format items minus penalties
-  correctness   2.0     normalized exact match of the <answer> span
+  correctness   0 or 2  normalized exact match of the <answer> span
   ClinicalBERT  [0, 1]  BERTScore F1 of answer vs. gold with Bio_ClinicalBERT
   BiomedCLIP    [0, 1]  cosine similarity of the image and the reasoning text
 
-TRL passes every dataset column to the reward functions as a keyword list, so
-``answer``, ``image`` and ``sample_id`` arrive aligned with ``completions``;
-``rollout_truncated`` is added by the trainer.
+TRL passes each dataset column as a keyword argument, a list aligned with
+``completions``; ``rollout_truncated`` is added by the trainer.
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ def formatting_reward_func(completions, answer=None, rollout_truncated=None, **k
     """0.5 each for: reasoning tags, reasoning length (8-40 words), answer tags,
     answer length (1 word for yes/no, else 1-3), strict ordered format.
     Penalties: repetition -1, truncation -1, empty reasoning block -2,
-    degenerate "addCriterion" loop -2."""
+    "addCriterion" and newlines filling half the text or more -2."""
 
     answers = answer or [""] * len(completions)
     truncated = rollout_truncated or [False] * len(completions)
@@ -99,6 +98,8 @@ _NUMBER_WORDS = {
 
 
 def normalize_answer(text: str) -> str:
+    """Lowercase, number words to digits, collapse whitespace, drop punctuation."""
+
     text = text.strip().lower()
     text = re.sub(r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\b",
                   lambda m: _NUMBER_WORDS[m.group(1)], text)
@@ -128,7 +129,7 @@ def clinical_bert_score_reward_func(prompts, completions, answer, **kwargs) -> l
         return scores
     device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
     if _clinical_bert_state.get("device") != device:
-        # Layer 9 of the 12-layer BERT-base encoder.
+        # Layer 9 of 12, BERTScore's default for BERT-base models.
         _clinical_bert_state["scorer"] = BERTScorer(
             model_type=CLINICAL_BERT_MODEL_NAME, num_layers=9, device=device
         )
@@ -187,8 +188,8 @@ def biomedclip_reasoning_reward_func(completions, image=None, images=None, sampl
     state = _load_biomedclip()
     model, device = state["model"], state["device"]
 
-    # Every rollout of a group shares one image; encode each image once and
-    # keep the features across steps, keyed by the dataset row.
+    # Rollouts of a group share an image: encode each image once and keep its
+    # features across steps (LRU cache keyed by dataset row).
     features, pending, missing = {}, {}, []
     for i in rows:
         key = ("sample", str(sample_ids[i])) if sample_ids[i] is not None else ("object", id(images[i]))

@@ -1,7 +1,7 @@
 """Output format shared by the prompt, the rewards and the SFT target.
 
-A response is ``<REASONING> ... </REASONING><answer> ... </answer>``. Every
-module reads the tags and the length limits from here.
+A response is ``<REASONING> ... </REASONING><answer> ... </answer>``. The tags
+and length limits are defined only here.
 """
 
 from __future__ import annotations
@@ -65,7 +65,8 @@ def has_obvious_repetition(text: str, *, ngram_size: int = REPETITION_NGRAM_SIZE
 
 
 def _raw_reasoning_candidate(completion: str) -> str:
-    """Recover possible reasoning even when tags are missing or incomplete."""
+    """Best guess at the reasoning when tags are missing or broken: the text after
+    <REASONING> (or from the start) up to the next tag."""
 
     text = str(completion or "")
     start = text.find(REASONING_START)
@@ -89,8 +90,8 @@ def salvage_reasoning(
     min_words: int = MIN_REASONING_WORDS,
     ngram_size: int = REPETITION_NGRAM_SIZE,
 ) -> str:
-    """Longest non-repeating prefix within ``max_words``, cut at the last
-    sentence (or clause) boundary that is at least ``min_words`` long."""
+    """Keep at most ``max_words`` words, stop before the first repeated n-gram, and
+    end at the last sentence (else clause) boundary after ``min_words`` words."""
 
     words = normalize_whitespace(text).split()
     if not words:
@@ -130,8 +131,8 @@ def reasoning_context_from_completion(
     min_words: int = MIN_REASONING_WORDS,
     ngram_size: int = REPETITION_NGRAM_SIZE,
 ) -> ReasoningContext:
-    """The rollout's own reasoning if it is valid, else a repaired prefix,
-    else an empty (unusable) context."""
+    """The rollout's reasoning as is if valid (one tagged block, length in range,
+    no repetition), else repaired by salvage_reasoning, else empty (unusable)."""
 
     text = str(completion or "")
     min_words = max(int(min_words), 1)

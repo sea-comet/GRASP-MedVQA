@@ -1,4 +1,4 @@
-"""Framework-independent math of the training objective.
+"""Math of the training objective, independent of the trainer.
 
 Notation (per optimizer step, G rollouts per question):
   p_b   fraction of the G rollouts of question b whose answer is correct
@@ -17,7 +17,7 @@ import torch
 
 @dataclass(frozen=True)
 class GroupFlags:
-    """Per-rollout group statistics, repeated over the G rollouts of a group."""
+    """Statistics of each rollout's group (the same value for all G rollouts)."""
 
     all_wrong: torch.Tensor
     all_correct: torch.Tensor
@@ -26,8 +26,8 @@ class GroupFlags:
 
 
 def group_flags(is_correct: torch.Tensor, is_valid: torch.Tensor, *, num_generations: int) -> GroupFlags:
-    """A group with an invalid (non-finite) correctness value is neither
-    all-wrong nor all-correct, so a reward failure is not read as a wrong answer."""
+    """A group with a non-finite correctness score is invalid: never all-wrong
+    or all-correct, so a failed reward is not counted as a wrong answer."""
 
     if is_correct.ndim != 1 or is_correct.numel() % num_generations:
         raise ValueError("is_correct must be 1-D and split into whole groups.")
@@ -46,10 +46,7 @@ def group_flags(is_correct: torch.Tensor, is_valid: torch.Tensor, *, num_generat
 def sft_row_weights(
     correct_fraction: torch.Tensor, valid: torch.Tensor, *, lambda_max: float, gamma: float
 ) -> torch.Tensor:
-    """Group-adaptive answer-SFT weight lambda(p_b) = lambda_max * (1 - p_b)^gamma.
-
-    A group with an invalid correctness value gets the mid-range weight (p = 0.5).
-    """
+    """SFT weight lambda(p_b) = lambda_max * (1 - p_b)^gamma; invalid groups use p_b = 0.5."""
 
     p = torch.where(valid.bool(), correct_fraction.float(), torch.full_like(correct_fraction.float(), 0.5))
     return float(lambda_max) * (1.0 - p.clamp(0.0, 1.0)).pow(float(gamma))
@@ -64,12 +61,10 @@ def state_adaptive_correction(
     scale: float,
     num_generations: int,
 ) -> torch.Tensor:
-    """Advantage shift g_b = (s_t / G) (p_b - mu_t) on all-wrong and all-correct groups.
+    """Advantage shift g_b = (s_t / G)(p_b - mu_t) for all-wrong and all-correct groups.
 
-    An all-wrong group (p_b = 0) moves by -s_t mu_t / G and an all-correct group
-    (p_b = 1) by +s_t (1 - mu_t) / G: one extra pseudo-rollout answered at the
-    running accuracy, in units of the running advantage scale. Mixed groups keep
-    their own group-relative signal and get no shift.
+    All-wrong (p_b = 0): -s_t * mu_t / G. All-correct (p_b = 1): +s_t * (1 - mu_t) / G.
+    Mixed groups already have a correctness contrast and get 0.
     """
 
     if not 0.0 <= float(mu) <= 1.0 or not math.isfinite(float(scale)) or float(scale) < 0.0:
@@ -88,17 +83,19 @@ def update_ema(old: float | None, observation: float, *, decay: float) -> float:
 
 
 def update_positive_ema(old: float | None, observation: float, *, decay: float, minimum: float) -> float:
+    """EMA with the observation and the result floored at ``minimum``."""
+
     observation = max(float(observation), float(minimum))
     return max(update_ema(old, observation, decay=decay), float(minimum))
 
 
 @dataclass(frozen=True)
 class ReferenceScale:
-    """Mean SFT NLL over the first ``warmup_steps`` micro-batches, then frozen.
+    """SFT loss normalizer: mean SFT NLL over the first ``warmup_steps``
+    micro-batches, then frozen.
 
-    A running average of the SFT loss would shrink as the target is fitted and,
-    used as a divisor, would amplify an already-learned target; a frozen
-    reference lets a fitted target genuinely stop pulling.
+    Not a running mean: that would shrink as the target is learned, and dividing
+    by it would keep the loss of an already-learned target large.
     """
 
     value: float
@@ -120,11 +117,10 @@ def update_reference_scale(
 
 
 def compensated_kl_beta(beta: float, loss_scale: float, *, max_ratio: float = 100.0) -> float:
-    """Undo the GSPO normalizer on the KL term.
+    """beta / loss_scale, capped at beta * max_ratio.
 
-    The upstream loss folds beta * KL into the scalar that the GSPO normalizer
-    multiplies; dividing beta by that normalizer keeps the effective KL
-    coefficient equal to the configured beta.
+    The upstream loss contains beta * KL and is multiplied as a whole by
+    loss_scale (the GSPO normalizer); this keeps the effective KL coefficient at beta.
     """
 
     if not math.isfinite(float(beta)) or float(beta) == 0.0:

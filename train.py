@@ -9,7 +9,7 @@ See train.sh for the configurations used in the paper.
 import argparse
 import os
 
-# Use the Unsloth-generated trainer as it is on disk; must precede `import unsloth`.
+# Reuse unsloth_compiled_cache/ instead of regenerating it; set before `import unsloth`.
 os.environ.setdefault("UNSLOTH_COMPILE_OVERWRITE", "0")
 
 from unsloth import FastVisionModel  # noqa: E402  (must be imported before trl / transformers)
@@ -22,16 +22,16 @@ from data import load_split, make_conversation  # noqa: E402
 from rewards import REWARD_FUNCS  # noqa: E402
 from trainer import GRPOConfig, HybridGRPOTrainer, configure_method  # noqa: E402
 
-# Rollout lengths vary, and every new shape recompiles the fused GRPO loss
-# (compiled with fullgraph=True); the default limits stop a multi-epoch run.
+# Rollout lengths vary, so the GRPO loss (torch.compile, fullgraph=True) keeps
+# recompiling; past Dynamo's default limits (8 / 256) it raises and training stops.
 torch._dynamo.config.recompile_limit = 4096
 torch._dynamo.config.accumulated_recompile_limit = 65536
 
 MAX_SEQ_LENGTH = 4096
 
-# Image placeholder tokens. A generated one would misalign the image features
-# in the next forward pass, so they are never sampled. InternVL3's language
-# model shares Qwen's vocabulary and adds its own three.
+# Image placeholder tokens, banned from sampling: one inside a rollout would
+# misalign the image features in later forward passes. InternVL3 uses Qwen's
+# vocabulary plus three tokens of its own.
 QWEN_VISUAL_TOKENS = ["<|vision_start|>", "<|vision_end|>", "<|image_pad|>", "<|video_pad|>"]
 INTERNVL_VISUAL_TOKENS = ["<img>", "</img>", "<IMG_CONTEXT>"]
 SUPPORTED_MODEL_TYPES = ("qwen3_vl", "internvl")
@@ -62,9 +62,9 @@ def parse_args():
     p.add_argument("--reward_weights", type=float, nargs=4, default=[0.5, 1.0, 0.2, 0.4],
                    help="format, correctness, ClinicalBERTScore, BiomedCLIP")
     # Answer SFT and correction
-    p.add_argument("--sft_lambda_max", type=float, default=0.4)
-    p.add_argument("--sft_gamma", type=float, default=1.0)
-    p.add_argument("--correction_kappa", type=float, default=1.0)
+    p.add_argument("--sft_lambda_max", type=float, default=0.4, help="lambda_max in lambda(p) = lambda_max (1 - p)^gamma")
+    p.add_argument("--sft_gamma", type=float, default=1.0, help="gamma in lambda(p)")
+    p.add_argument("--correction_kappa", type=float, default=1.0, help="Strength of the advantage correction")
     p.add_argument("--sft_target_template", default="<answer>{answer}</answer>")
     # Bookkeeping
     p.add_argument("--save_steps", type=int, default=100)
@@ -113,7 +113,7 @@ def main():
         use_gradient_checkpointing="unsloth",
     )
 
-    # Map the text with undecoded image paths, then switch to lazy decoding.
+    # Build prompts while images are still paths; images are decoded when accessed.
     train_dataset = load_split(args.data_root, "train")
     train_dataset = train_dataset.map(make_conversation, with_indices=True, num_proc=8, load_from_cache_file=False)
     train_dataset = train_dataset.cast_column("image", Image(decode=True))

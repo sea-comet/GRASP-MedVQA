@@ -1,21 +1,16 @@
-"""InternVL3 branch: the same objective, with the image routed through the
-Qwen-shaped GRPO plumbing.
+"""InternVL3-8B support: the same objective plus two compatibility fixes.
 
-InternVL3-8B-hf's processor turns every image into one 448x448 tile, so
-``pixel_values`` is batch-major, one row per sample, and the image is expanded
-into ``<img>`` + 256 ``<IMG_CONTEXT>`` + ``</img>`` in the prompt. Two things
-differ from Qwen3-VL:
+InternVL3-8B-hf turns each image into one 448x448 tile, so ``pixel_values``
+has one row per sample.
 
-* The upstream chunked policy forward slices ``pixel_values`` only when
-  ``image_grid_thw`` is present and otherwise gives every chunk
-  ``pixel_values=None`` (the policy would silently train without the image). A
-  ones-grid makes the running offset advance one row per sample; a router
-  removes it again before InternVL's forward, which would pass the unknown key
-  on to the language model.
-* The language model uses dynamic-NTK RoPE, whose sequence-length branch cannot
-  be compiled. Below ``max_position_embeddings`` (32,768) it equals the default
-  RoPE, and sequences here stay within 4,096 tokens, so the module is switched
-  to the default type (numerically identical).
+1. Images. The upstream trainer splits ``pixel_values`` into chunks only when
+   ``image_grid_thw`` is given; otherwise every chunk gets no image and the
+   policy silently trains text-only. We pass a dummy all-ones grid (one row per
+   sample) and remove it before InternVL's forward, which would pass the
+   unknown key on to its language model.
+2. RoPE. The language model uses dynamic-NTK RoPE, which cannot be compiled.
+   Below 32,768 tokens it equals the default RoPE, and our sequences stay within
+   4,096, so the rotary modules are switched to the default type.
 """
 
 from __future__ import annotations
@@ -31,12 +26,14 @@ _QWEN_SHAPED_KEYS = ("image_grid_thw", "pixel_attention_mask", "image_sizes")
 
 
 def row_major_grid(num_rows: int, device: torch.device) -> torch.Tensor:
+    """Dummy ``image_grid_thw``: one image row per sample."""
+
     return torch.ones((int(num_rows), 1), device=device, dtype=torch.long)
 
 
 def use_default_rope(model: Any, max_seq_length: int) -> list[str]:
-    """Switch dynamic-NTK rotary modules to the default type, after checking
-    that their frequencies are the default ones."""
+    """Switch dynamic-NTK rotary modules to the default type after checking that
+    their frequencies match; returns the changed module names."""
 
     from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
@@ -76,16 +73,15 @@ def _find_internvl_module(model: Any):
 
 
 class InternVLVisionRouter:
-    """Strip the Qwen-shaped keys before InternVL's forward sees them. Covers the
-    reference / old log-prob forwards, the chunked policy forward and the SFT forward."""
+    """Wraps InternVL's forward to drop the Qwen-only keys (``image_grid_thw`` etc.),
+    for every forward pass: reference, old policy, policy and SFT."""
 
     def __init__(self, model: Any):
         self.module = _find_internvl_module(model)
         original = self.module.forward
         self.stripped_calls = 0
 
-        # functools.wraps keeps the real signature, which decides whether
-        # logits_to_keep is passed.
+        # Keep the original signature: upstream inspects it to decide whether to pass logits_to_keep.
         @functools.wraps(original)
         def routed_forward(*args: Any, **kwargs: Any):
             removed = [kwargs.pop(key) for key in _QWEN_SHAPED_KEYS if key in kwargs]
@@ -116,7 +112,7 @@ class InternVLHybridGRPOTrainer(HybridGRPOTrainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if self._needs_grid(inputs):
-            # A copy, so the grid does not leak back into the buffered rollout batch.
+            # Copy, so the dummy grid is not written into the buffered rollout batch.
             inputs = dict(inputs)
             inputs["image_grid_thw"] = row_major_grid(inputs["prompt_ids"].size(0), inputs["prompt_ids"].device)
         return super().compute_loss(

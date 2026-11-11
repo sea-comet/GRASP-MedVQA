@@ -25,7 +25,7 @@ CACHE_DIRNAME = "_training_images_512"
 
 
 def load_split(root: str | Path, split: str = "train"):
-    """The split with an ``image`` column pointing at the 512px cache (not decoded)."""
+    """Load ``<root>/<split>/qa.jsonl`` with an ``image`` column of cached image paths (not decoded)."""
 
     from datasets import Image, load_dataset
 
@@ -54,6 +54,6 @@ def make_conversation(example, idx):
         ],
         "image": example["image"],
         "answer": example["answer"],
-        # Row index; the BiomedCLIP reward caches image features under it.
+        # Row index: the BiomedCLIP reward's cache key for image features.
         "sample_id": idx,
     }
