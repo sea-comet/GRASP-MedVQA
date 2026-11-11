@@ -10,6 +10,7 @@ Expected layout (see README):
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 from format_utils import (
@@ -22,6 +23,17 @@ from format_utils import (
 )
 
 CACHE_DIRNAME = "_training_images_512"
+
+# Prompt of the "selfreasoning" SFT context (trainer.py): the policy is told the gold
+# answer and describes what it sees. There is no format instruction and no "finish with
+# this answer", so the reply usually does not name the answer, and the model still has
+# to infer the answer when it follows this text in the SFT target.
+SELFREASONING_HINT = (
+    'The answer to the following question is "{answer}"; do not repeat it.\n{question}\nDescribe only the visual '
+    "evidence in this image that is relevant to this question, in two or three sentences (at most 40 words), without "
+    "stating the answer, a diagnosis or any conclusion. Do not invent lesions, locations, sizes, signal intensities or "
+    "diagnoses that are not visible; if the evidence is subtle, say so in general terms."
+)
 
 
 def load_split(root: str | Path, split: str = "train"):
@@ -57,3 +69,13 @@ def make_conversation(example, idx):
         # Row index: the BiomedCLIP reward's cache key for image features.
         "sample_id": idx,
     }
+
+
+def make_selfreasoning_prompt(prompt, question: str, answer: str):
+    """A copy of a training prompt with its text replaced by SELFREASONING_HINT; the image stays."""
+
+    hinted = copy.deepcopy(prompt)
+    for part in hinted[0]["content"]:
+        if part["type"] == "text":
+            part["text"] = SELFREASONING_HINT.format(answer=answer, question=question)
+    return hinted

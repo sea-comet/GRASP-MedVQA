@@ -13,23 +13,35 @@ Subclasses the GRPO trainer that unsloth 2026.2.1 generates for trl 0.24.0
    rollout's reasoning (borrowed from another rollout if it has none).
    Cross-entropy on the answer and EOS only, weighted per row by lambda(p_b)
    and divided by a reference NLL that is frozen after the first steps.
+
+Two options choose c for wrong rollouts, whose own reasoning usually argues for
+another answer. Both are off by default, which is the paper's method. They change
+only c, which is not supervised:
+- sft_hybrid_wrong_row_context="correct_sibling": in a hybrid group (some rollouts
+  right, some wrong), a wrong row uses the reasoning of a random correct rollout.
+- sft_all_wrong_context="selfreasoning": in an open-ended all-wrong group, the policy
+  is told the gold answer and writes what it sees; every row uses that text.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from contextlib import nullcontext
+import copy
 import json
 import os
 from pathlib import Path
+import random
 from typing import Any
 
+from accelerate.utils import gather_object
 import torch
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 import unsloth_compiled_cache.UnslothGRPOTrainer as _upstream
 
+from data import make_selfreasoning_prompt
 from format_utils import (
     MAX_REASONING_WORDS,
     MIN_REASONING_WORDS,
@@ -38,6 +50,7 @@ from format_utils import (
     REPETITION_NGRAM_SIZE,
     SOLUTION_END,
     SOLUTION_START,
+    selfreasoning_from_reply,
     reasoning_context_from_completion,
 )
 from objective import (
@@ -50,6 +63,7 @@ from objective import (
     update_positive_ema,
     update_reference_scale,
 )
+from rewards import normalize_answer
 
 GRPOConfig = _upstream.UnslothGRPOConfig
 
@@ -64,6 +78,13 @@ METHOD_DEFAULTS = {
     "sft_min_reasoning_words": MIN_REASONING_WORDS,
     "sft_max_reasoning_words": MAX_REASONING_WORDS,
     "sft_repetition_ngram_size": REPETITION_NGRAM_SIZE,
+    # c of the wrong rows of a hybrid group (some rollouts right, some wrong):
+    # "own" keeps their reasoning, "correct_sibling" uses a correct rollout's.
+    "sft_hybrid_wrong_row_context": "own",
+    # c of an open-ended all-wrong group: "own" keeps each row's reasoning,
+    # "selfreasoning" uses a text the policy writes when told the gold answer.
+    "sft_all_wrong_context": "own",
+    "selfreasoning_temperature": 0.7,
     # Recent usable reasonings, kept across steps: the SFT context of last
     # resort when no rollout in the batch has one.
     "sft_donor_bank_size": 256,
@@ -88,6 +109,12 @@ def configure_method(config: Any, **overrides: Any) -> Any:
         raise ValueError("sft_target_template must contain {answer}.")
     if float(values["sft_gamma"]) <= 0 or float(values["correction_kappa"]) <= 0:
         raise ValueError("sft_gamma and correction_kappa must be positive.")
+    if values["sft_hybrid_wrong_row_context"] not in ("own", "correct_sibling"):
+        raise ValueError('sft_hybrid_wrong_row_context must be "own" or "correct_sibling".')
+    if values["sft_all_wrong_context"] not in ("own", "selfreasoning"):
+        raise ValueError('sft_all_wrong_context must be "own" or "selfreasoning".')
+    if float(values["selfreasoning_temperature"]) <= 0:
+        raise ValueError("selfreasoning_temperature must be positive.")
     for name, value in values.items():
         setattr(config, name, value)
     return config
@@ -180,6 +207,10 @@ class HybridGRPOTrainer(_upstream.UnslothGRPOTrainer):
         stats = self._all_reduce_sum(torch.stack([values.square().sum(), values.new_tensor(float(values.numel()))]))
         return torch.sqrt(stats[0] / stats[1].clamp(min=1.0)).item()
 
+    def _global_fraction(self, count: int, total: int, device) -> float:
+        stats = self._all_reduce_sum(torch.tensor([float(count), float(total)], device=device))
+        return (stats[0] / stats[1].clamp(min=1.0)).item()
+
     def _log(self, mode: str, name: str, value: float) -> None:
         self._metrics[mode][name].append(float(value))
 
@@ -203,17 +234,23 @@ class HybridGRPOTrainer(_upstream.UnslothGRPOTrainer):
         flags = group_flags(is_correct, valid, num_generations=int(self.num_generations))
         start = self.accelerator.process_index * len(completions)
         local = slice(start, start + len(completions))
+        completion_texts = [
+            c[0].get("content", "") if isinstance(c, list) and c else str(c or "") for c in completions
+        ]
         self._rollout_cache = {
             "group_all_wrong": flags.all_wrong[local].clone(),
             "group_all_correct": flags.all_correct[local].clone(),
             "group_valid": flags.valid[local].clone(),
             "group_correct_fraction": flags.correct_fraction[local].clone(),
             "is_correct": is_correct[local].clone(),
-            "completion_texts": [
-                c[0].get("content", "") if isinstance(c, list) and c else str(c or "") for c in completions
-            ],
+            "completion_texts": completion_texts,
+            "process_start": start,
             "batch_accuracy": is_correct[valid].float().mean().item() if bool(valid.any()) else None,
         }
+        if self.sft_hybrid_wrong_row_context == "correct_sibling":
+            # A group's rollouts can sit on several GPUs.
+            self._rollout_cache["global_completion_texts"] = gather_object(completion_texts)
+            self._rollout_cache["global_is_correct"] = is_correct.tolist()
         mode = "train" if self.model.training else "eval"
         per_group = lambda t: t.view(-1, int(self.num_generations))[:, 0].float().mean().item()  # noqa: E731
         self._log(mode, "groups/all_wrong", per_group(flags.all_wrong))
@@ -241,9 +278,12 @@ class HybridGRPOTrainer(_upstream.UnslothGRPOTrainer):
         output["total_advantages"] = relative + shift.to(device=relative.device, dtype=relative.dtype)
         output["advantages"] = output["total_advantages"]
 
-        ids, attention, loss_mask = self._build_sft_targets(
-            inputs, cache["completion_texts"], output["completion_ids"].device, cache["is_correct"]
-        )
+        # Outside the bucketed-pad block above: only some GPUs generate here, and
+        # the bucketed pad would wait for the others forever.
+        selfreasoning = None
+        if self.sft_all_wrong_context == "selfreasoning" and self.model.training:
+            selfreasoning = self._selfreasoning_contexts(inputs, cache)
+        ids, attention, loss_mask = self._build_sft_targets(inputs, cache, selfreasoning, output["completion_ids"].device)
         output["sft_completion_ids"] = ids
         output["sft_completion_mask"] = attention
         output["sft_loss_mask"] = loss_mask
@@ -313,20 +353,132 @@ class HybridGRPOTrainer(_upstream.UnslothGRPOTrainer):
             self._donor_bank.append(contexts[index].text)
         return texts
 
-    def _build_sft_targets(self, inputs, completion_texts, device, is_correct):
+    def _parsed_reasoning(self, text):
+        return reasoning_context_from_completion(
+            text,
+            max_words=int(self.sft_max_reasoning_words),
+            min_words=int(self.sft_min_reasoning_words),
+            ngram_size=int(self.sft_repetition_ngram_size),
+        )
+
+    def _borrow_correct_sibling_contexts(self, texts, cache):
+        """Give each wrong row of a hybrid group the reasoning of a random correct
+        rollout of its group, in place. Returns how many rows changed.
+
+        The gold answer then follows reasoning that led to it. A row keeps its context
+        if its group has no correct rollout with usable reasoning (all-wrong groups).
+        The random choice depends only on the step and the row, not on the number of GPUs.
+        """
+
+        size = int(self.num_generations)
+        start = cache["process_start"]
+        step = int(self.state.global_step)
+        correct = cache["global_is_correct"]
+        parsed = {}
+        borrowed = 0
+        for index in range(len(texts)):
+            row = start + index
+            if correct[row]:
+                continue
+            candidates = []
+            first = row // size * size
+            for sibling in range(first, first + size):
+                if not correct[sibling]:
+                    continue
+                if sibling not in parsed:
+                    parsed[sibling] = self._parsed_reasoning(cache["global_completion_texts"][sibling])
+                if parsed[sibling].usable:
+                    candidates.append(parsed[sibling].text)
+            if candidates:
+                texts[index] = random.Random(f"{step}:{row}").choice(candidates)
+                borrowed += 1
+        return borrowed
+
+    def _generate_selfreasoning_replies(self, inputs, rows):
+        """Ask the current policy for one reply per row in ``rows``, without gradient."""
+
+        if not rows:
+            return []
+        prompts = [
+            make_selfreasoning_prompt(inputs[i]["prompt"], str(inputs[i]["question"]).strip(), str(inputs[i]["answer"]).strip())
+            for i in rows
+        ]
+        images = [[inputs[i]["image"]] for i in rows]
+        previous = self.generation_config
+        self.generation_config = copy.deepcopy(previous)
+        self.generation_config.temperature = float(self.selfreasoning_temperature)
+        try:
+            _, completion_ids, _, _ = self._generate_single_turn(prompts, images)
+        finally:
+            self.generation_config = previous
+        tokenizer = getattr(self.processing_class, "tokenizer", self.processing_class)
+        return tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
+
+    def _selfreasoning_contexts(self, inputs, cache):
+        """{local row: text} for the open-ended all-wrong groups.
+
+        The policy is told the gold answer and writes what it sees in the image. The text
+        is only context: the loss stays on the answer, so the policy is not taught to write
+        it, even if it invents a finding.
+
+        Yes/no groups keep their own reasoning, because the text often contradicts a forced
+        "yes" or "no". A reply shorter than sft_min_reasoning_words is dropped, and its group
+        keeps its own reasoning too.
+
+        A group can sit on two GPUs. The GPU holding its first row writes the text and shares
+        it, so all rows of a group get the same text. Replies are saved to
+        selfreasoning.rank<N>.jsonl, to check what they claim to see.
+        """
+
+        size = int(self.num_generations)
+        start = cache["process_start"]
+        owned = [
+            index
+            for index, row in enumerate(inputs)
+            if (start + index) % size == 0
+            and bool(cache["group_all_wrong"][index])  # already false for invalid groups
+            and normalize_answer(str(row["answer"])) not in {"yes", "no"}
+        ]
+        replies = self._generate_selfreasoning_replies(inputs, owned)
+        contexts = [selfreasoning_from_reply(reply, min_words=int(self.sft_min_reasoning_words)) for reply in replies]
+        if owned:
+            rank = self.accelerator.process_index
+            path = Path(self.args.output_dir) / f"selfreasoning.rank{rank}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                for index, reply, context in zip(owned, replies, contexts):
+                    handle.write(json.dumps({
+                        "step": int(self.state.global_step),
+                        "question": inputs[index]["question"],
+                        "gold": inputs[index]["answer"],
+                        "reply": reply,
+                        "context": context,
+                    }, ensure_ascii=False) + "\n")
+
+        results = gather_object([((start + index) // size, context) for index, context in zip(owned, contexts)])
+        self._log("train", "sft/selfreasoning_groups", len(results))
+        by_group = {group: context for group, context in results if context is not None}
+        return {
+            index: by_group[(start + index) // size]
+            for index in range(len(inputs))
+            if (start + index) // size in by_group
+        }
+
+    def _build_sft_targets(self, inputs, cache, selfreasoning, device):
         """SFT token ids, attention mask and loss mask, padded to sft_max_completion_length."""
 
         tokenizer = getattr(self.processing_class, "tokenizer", self.processing_class)
-        contexts = [
-            reasoning_context_from_completion(
-                text,
-                max_words=int(self.sft_max_reasoning_words),
-                min_words=int(self.sft_min_reasoning_words),
-                ngram_size=int(self.sft_repetition_ngram_size),
-            )
-            for text in completion_texts
-        ]
-        reasoning_texts = self._assign_reasoning_contexts(contexts, is_correct)
+        contexts = [self._parsed_reasoning(text) for text in cache["completion_texts"]]
+        reasoning_texts = self._assign_reasoning_contexts(contexts, cache["is_correct"])
+        mode = "train" if self.model.training else "eval"
+        count = len(reasoning_texts)
+        if self.sft_hybrid_wrong_row_context == "correct_sibling":
+            borrowed = self._borrow_correct_sibling_contexts(reasoning_texts, cache)
+            self._log(mode, "sft/sibling_row_fraction", self._global_fraction(borrowed, count, device))
+        if selfreasoning is not None:
+            for index, text in selfreasoning.items():
+                reasoning_texts[index] = text
+            self._log(mode, "sft/selfreasoning_row_fraction", self._global_fraction(len(selfreasoning), count, device))
         solutions = [str(self.sft_target_template).format(answer=str(row["answer"]).strip()) for row in inputs]
 
         encode = lambda texts: tokenizer(texts, add_special_tokens=False, padding=False)["input_ids"]  # noqa: E731

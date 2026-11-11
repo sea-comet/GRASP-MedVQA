@@ -30,6 +30,7 @@ _STRICT_PATTERN = re.compile(
     rf"\s*{re.escape(SOLUTION_START)}(.*?){re.escape(SOLUTION_END)}\s*$",
     flags=re.DOTALL,
 )
+_FORMAT_TAG = re.compile(r"</?(?:REASONING|answer)>", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?](?:[\"')\]]*)$")
 _CLAUSE_END = re.compile(r"[,;:](?:[\"')\]]*)$")
 
@@ -152,6 +153,14 @@ def reasoning_context_from_completion(
     if len(repaired.split()) >= min_words:
         return ReasoningContext(text=repaired, source="salvaged")
     return ReasoningContext(text="", source="empty")
+
+
+def selfreasoning_from_reply(reply: str, *, min_words: int = MIN_REASONING_WORDS) -> str | None:
+    """The whole reply to the "selfreasoning" prompt (data.make_selfreasoning_prompt),
+    without format tags; None if it has fewer than ``min_words`` words."""
+
+    text = normalize_whitespace(_FORMAT_TAG.sub(" ", str(reply or "")))
+    return text if len(text.split()) >= max(int(min_words), 1) else None
 
 
 def analyze_completion_format(

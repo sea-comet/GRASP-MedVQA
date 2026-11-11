@@ -52,6 +52,20 @@ are sampled (temperature 1.15) and scored with
 
        lambda(p_b) = lambda_max (1 - p_b)^gamma,        lambda_max = 0.4, gamma = 1
 
+   Two options choose c for wrong rollouts, whose own reasoning usually argues
+   for another answer. Both default to `own`, which is the paper's method. They
+   change only c, which stays unsupervised:
+
+   - `--sft_hybrid_wrong_row_context correct_sibling`: in a hybrid group (some
+     rollouts right, some wrong), a wrong row uses the reasoning of a random
+     correct rollout of its group.
+   - `--sft_all_wrong_context selfreasoning`: in an open-ended all-wrong group,
+     the policy writes one text, without gradient at temperature 0.7, when told
+     the gold answer and asked what it sees without repeating the answer
+     (`SELFREASONING_HINT` in `data.py`). Every row of the group uses that text.
+     Yes/no all-wrong groups keep their own reasoning. Replies are saved to
+     `OUTPUT_DIR/selfreasoning.rank<N>.jsonl`.
+
 4. **Loss.** `L = L_GSPO / EMA(RMS(A_total)) + sum_rows lambda(p_b) NLL_row / (N_tokens * NLL_ref)`,
    where NLL_ref is the mean answer NLL of the first 20 micro-batches (then
    frozen, floor 0.5). The KL coefficient is rescaled so that its effective value stays
@@ -125,6 +139,7 @@ written to `OUTPUT_DIR/final_lora` and `OUTPUT_DIR/final_merged`.
 | answer SFT | lambda_max 0.4, gamma 1, reasoning context 8-40 words, NLL_ref over 20 micro-batches |
 | correction | kappa 1, EMA decay 0.99 |
 | reward weights | format 0.5, correctness 1.0, ClinicalBERTScore 0.2, BiomedCLIP 0.4 |
+| SFT context options | off (`own`); selfreasoning: temperature 0.7, at least 8 words |
 | seed | 42 (LoRA initialization, data order, sampling) |
 
 ## Evaluation
