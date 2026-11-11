@@ -73,7 +73,7 @@ are sampled (temperature 1.15) and scored with
 
 ## Setup
 
-    conda create -n grpo python=3.11 && conda activate grpo
+    conda create -n grasp python=3.11 && conda activate grasp
     pip install -r requirements.txt
 
 `import unsloth` writes `unsloth_compiled_cache/UnslothGRPOTrainer.py` into the
