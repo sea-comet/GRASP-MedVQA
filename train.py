@@ -66,7 +66,7 @@ def parse_args():
     p.add_argument("--sft_gamma", type=float, default=1.0, help="gamma in lambda(p)")
     p.add_argument("--correction_kappa", type=float, default=1.0, help="Strength of the advantage correction")
     p.add_argument("--sft_target_template", default="<answer>{answer}</answer>")
-    p.add_argument("--sft_hybrid_wrong_row_context", choices=["own", "correct_sibling"], default="own",
+    p.add_argument("--sft_mixed_wrong_row_context", choices=["own", "correct_sibling"], default="own",
                    help="Wrong rows of a group with both right and wrong rollouts: own reasoning (paper), or a correct rollout's")
     p.add_argument("--sft_all_wrong_context", choices=["own", "selfreasoning"], default="own",
                    help="Open-ended group with no right rollout: own reasoning (paper), or text the policy writes given the gold answer")
@@ -170,7 +170,7 @@ def main():
         sft_gamma=args.sft_gamma,
         correction_kappa=args.correction_kappa,
         sft_target_template=args.sft_target_template,
-        sft_hybrid_wrong_row_context=args.sft_hybrid_wrong_row_context,
+        sft_mixed_wrong_row_context=args.sft_mixed_wrong_row_context,
         sft_all_wrong_context=args.sft_all_wrong_context,
         selfreasoning_temperature=args.selfreasoning_temperature,
     )

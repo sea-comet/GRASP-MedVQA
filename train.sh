@@ -13,8 +13,8 @@ BATCH_SIZE=12              # rollouts per GPU (4 GPUs x 12 = 48)
 DATA_ROOT=../data          # the unpacked data release
 OUTPUT_DIR=outputs/$MODEL  # checkpoints and the final model
 # SFT reasoning for wrong rollouts. "own" for both is the paper's method.
-HYBRID_WRONG_ROW_CONTEXT=own  # own or correct_sibling: wrong rows of groups with some right rollouts
-ALL_WRONG_CONTEXT=own         # own or selfreasoning: open-ended groups with no right rollout
+MIXED_WRONG_ROW_CONTEXT=own  # own or correct_sibling: wrong rows of groups with some right rollouts
+ALL_WRONG_CONTEXT=own        # own or selfreasoning: open-ended groups with no right rollout
 # ---------------------------------------------------------------------------
 
 set -euo pipefail        # stop at the first error
@@ -48,6 +48,6 @@ accelerate launch --num_processes "$NUM_GPUS" train.py \
     --reward_weights 0.5 1.0 0.2 0.4 \
     --sft_lambda_max 0.4 --sft_gamma 1.0 \
     --correction_kappa 1.0 \
-    --sft_hybrid_wrong_row_context "$HYBRID_WRONG_ROW_CONTEXT" \
+    --sft_mixed_wrong_row_context "$MIXED_WRONG_ROW_CONTEXT" \
     --sft_all_wrong_context "$ALL_WRONG_CONTEXT" \
     "$@"

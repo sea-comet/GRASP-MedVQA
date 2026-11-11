@@ -17,7 +17,7 @@ Subclasses the GRPO trainer that unsloth 2026.2.1 generates for trl 0.24.0
 Two options choose c for wrong rollouts, whose own reasoning usually argues for
 another answer. Both are off by default, which is the paper's method. They change
 only c, which is not supervised:
-- sft_hybrid_wrong_row_context="correct_sibling": in a hybrid group (some rollouts
+- sft_mixed_wrong_row_context="correct_sibling": in a mixed group (some rollouts
   right, some wrong), a wrong row uses the reasoning of a random correct rollout.
 - sft_all_wrong_context="selfreasoning": in an open-ended all-wrong group, the policy
   is told the gold answer and writes what it sees; every row uses that text.
@@ -78,9 +78,9 @@ METHOD_DEFAULTS = {
     "sft_min_reasoning_words": MIN_REASONING_WORDS,
     "sft_max_reasoning_words": MAX_REASONING_WORDS,
     "sft_repetition_ngram_size": REPETITION_NGRAM_SIZE,
-    # c of the wrong rows of a hybrid group (some rollouts right, some wrong):
+    # c of the wrong rows of a mixed group (some rollouts right, some wrong):
     # "own" keeps their reasoning, "correct_sibling" uses a correct rollout's.
-    "sft_hybrid_wrong_row_context": "own",
+    "sft_mixed_wrong_row_context": "own",
     # c of an open-ended all-wrong group: "own" keeps each row's reasoning,
     # "selfreasoning" uses a text the policy writes when told the gold answer.
     "sft_all_wrong_context": "own",
@@ -109,8 +109,8 @@ def configure_method(config: Any, **overrides: Any) -> Any:
         raise ValueError("sft_target_template must contain {answer}.")
     if float(values["sft_gamma"]) <= 0 or float(values["correction_kappa"]) <= 0:
         raise ValueError("sft_gamma and correction_kappa must be positive.")
-    if values["sft_hybrid_wrong_row_context"] not in ("own", "correct_sibling"):
-        raise ValueError('sft_hybrid_wrong_row_context must be "own" or "correct_sibling".')
+    if values["sft_mixed_wrong_row_context"] not in ("own", "correct_sibling"):
+        raise ValueError('sft_mixed_wrong_row_context must be "own" or "correct_sibling".')
     if values["sft_all_wrong_context"] not in ("own", "selfreasoning"):
         raise ValueError('sft_all_wrong_context must be "own" or "selfreasoning".')
     if float(values["selfreasoning_temperature"]) <= 0:
@@ -247,7 +247,7 @@ class HybridGRPOTrainer(_upstream.UnslothGRPOTrainer):
             "process_start": start,
             "batch_accuracy": is_correct[valid].float().mean().item() if bool(valid.any()) else None,
         }
-        if self.sft_hybrid_wrong_row_context == "correct_sibling":
+        if self.sft_mixed_wrong_row_context == "correct_sibling":
             # A group's rollouts can sit on several GPUs.
             self._rollout_cache["global_completion_texts"] = gather_object(completion_texts)
             self._rollout_cache["global_is_correct"] = is_correct.tolist()
@@ -362,7 +362,7 @@ class HybridGRPOTrainer(_upstream.UnslothGRPOTrainer):
         )
 
     def _borrow_correct_sibling_contexts(self, texts, cache):
-        """Give each wrong row of a hybrid group the reasoning of a random correct
+        """Give each wrong row of a mixed group the reasoning of a random correct
         rollout of its group, in place. Returns how many rows changed.
 
         The gold answer then follows reasoning that led to it. A row keeps its context
@@ -472,7 +472,7 @@ class HybridGRPOTrainer(_upstream.UnslothGRPOTrainer):
         reasoning_texts = self._assign_reasoning_contexts(contexts, cache["is_correct"])
         mode = "train" if self.model.training else "eval"
         count = len(reasoning_texts)
-        if self.sft_hybrid_wrong_row_context == "correct_sibling":
+        if self.sft_mixed_wrong_row_context == "correct_sibling":
             borrowed = self._borrow_correct_sibling_contexts(reasoning_texts, cache)
             self._log(mode, "sft/sibling_row_fraction", self._global_fraction(borrowed, count, device))
         if selfreasoning is not None:

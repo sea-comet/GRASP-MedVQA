@@ -56,7 +56,7 @@ are sampled (temperature 1.15) and scored with
    for another answer. Both default to `own`, which is the paper's method. They
    change only c, which stays unsupervised:
 
-   - `--sft_hybrid_wrong_row_context correct_sibling`: in a hybrid group (some
+   - `--sft_mixed_wrong_row_context correct_sibling`: in a mixed group (some
      rollouts right, some wrong), a wrong row uses the reasoning of a random
      correct rollout of its group.
    - `--sft_all_wrong_context selfreasoning`: in an open-ended all-wrong group,
